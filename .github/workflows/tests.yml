@@ -57,8 +57,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NEXT_PUBLIC_SELF_HOST: "true"
-      BACKEND_AUTH_SECRET: supoclip_test_secret
       BETTER_AUTH_SECRET: supoclip_better_auth_test_secret
+      # BACKEND_AUTH_SECRET intentionally unset here: the vitest suite controls it
+      # per-test (backend-auth.test.ts delete/set; route.test.ts stubs it). A
+      # job-level value leaks into the "signed backend auth is unavailable" case,
+      # whose vi.unstubAllEnvs() only clears stubbed vars, not real process.env.
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
