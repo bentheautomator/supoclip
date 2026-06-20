@@ -24,6 +24,9 @@ async def process_video_task(
     font_color: str = "#FFFFFF",
     caption_template: str = "default",
     processing_mode: str = "fast",
+    output_format: str = "vertical",
+    add_subtitles: bool = True,
+    cleanup_settings: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
     Background worker task to process a video.
@@ -42,6 +45,7 @@ async def process_video_task(
         Dict with processing results
     """
     from ..database import AsyncSessionLocal
+    from ..runtime_settings import load_runtime_settings_cache
     from ..services.task_service import TaskService
     from ..workers.progress import ProgressTracker
 
@@ -52,6 +56,7 @@ async def process_video_task(
     progress = ProgressTracker(ctx["redis"], task_id)
 
     async with AsyncSessionLocal() as db:
+        await load_runtime_settings_cache(db)
         task_service = TaskService(db)
 
         try:
@@ -66,6 +71,11 @@ async def process_video_task(
                 cancelled = await ctx["redis"].get(f"task_cancel:{task_id}")
                 return bool(cancelled)
 
+            async def clip_ready_callback(
+                clip_index: int, total_clips: int, clip_data: dict
+            ):
+                await progress.clip_ready(clip_index, total_clips, clip_data)
+
             # Process the video
             result = await task_service.process_task(
                 task_id=task_id,
@@ -76,8 +86,12 @@ async def process_video_task(
                 font_color=font_color,
                 caption_template=caption_template,
                 processing_mode=processing_mode,
+                output_format=output_format,
+                add_subtitles=add_subtitles,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
+                clip_ready_callback=clip_ready_callback,
+                cleanup_settings=cleanup_settings,
             )
 
             logger.info(f"Task {task_id} completed successfully")
@@ -104,7 +118,6 @@ async def process_video_task(
             # Error will be caught by arq and task status will be updated
             raise
 
-
 # Worker configuration for arq
 class WorkerSettings:
     """Configuration for arq worker."""
@@ -120,12 +133,13 @@ class WorkerSettings:
 
     # Redis settings from environment
     redis_settings = RedisSettings(
-        host=config.redis_host, port=config.redis_port, database=0
+        host=config.redis_host, port=config.redis_port, password=config.redis_password, database=0
     )
 
     # Retry settings
     max_tries = 3  # Retry failed jobs up to 3 times
-    job_timeout = 3600  # 1 hour timeout for video processing
+    job_timeout = 10800  # 3 hour timeout for video processing
 
     # Worker pool settings
     max_jobs = 4  # Process up to 4 jobs simultaneously
+    cron_jobs = []

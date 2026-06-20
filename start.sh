@@ -26,6 +26,7 @@ if [ ! -f .env ]; then
     echo "  3. Edit .env and add your API keys:"
     echo "     - ASSEMBLY_AI_API_KEY (required)"
     echo "     - OPENAI_API_KEY or GOOGLE_API_KEY or ANTHROPIC_API_KEY"
+    echo "     - OR set LLM=ollama:<model> (optional: OLLAMA_BASE_URL, OLLAMA_API_KEY)"
     echo ""
     exit 1
 fi
@@ -33,16 +34,41 @@ fi
 # Check if required API keys are set
 source .env
 
+if [ -n "${LLM:-}" ]; then
+    case "$LLM" in
+        google:*|google-gla:*|openai:*|anthropic:*|ollama:*)
+            ;;
+        *)
+            echo -e "${YELLOW}Warning: Unsupported LLM value '$LLM'${NC}"
+            echo "Use google-gla:*, openai:*, anthropic:*, or ollama:*"
+            echo ""
+            ;;
+    esac
+fi
+
 if [ -z "$ASSEMBLY_AI_API_KEY" ]; then
     echo -e "${YELLOW}Warning: ASSEMBLY_AI_API_KEY is not set in .env${NC}"
     echo "Video transcription will not work without this key."
     echo ""
 fi
 
-if [ -z "$OPENAI_API_KEY" ] && [ -z "$GOOGLE_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
-    echo -e "${YELLOW}Warning: No AI provider API key is set in .env${NC}"
-    echo "You need at least one of: OPENAI_API_KEY, GOOGLE_API_KEY, or ANTHROPIC_API_KEY"
+if [ "${LLM:-}" = "ollama:" ]; then
+    echo -e "${YELLOW}Warning: LLM=ollama: is missing a model name${NC}"
+    echo "Use a value like LLM=ollama:gpt-oss:20b"
     echo ""
+elif [[ "${LLM:-}" == ollama:* ]] && [ -z "${OLLAMA_BASE_URL:-}" ]; then
+    echo "Ollama base URL is not set; SupoClip will use its local/Docker default."
+    echo ""
+fi
+
+if [ -z "$OPENAI_API_KEY" ] && [ -z "$GOOGLE_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
+    if [[ "${LLM:-}" == ollama:* ]]; then
+        :
+    else
+    echo -e "${YELLOW}Warning: No AI provider API key is set in .env${NC}"
+    echo "You need at least one of: OPENAI_API_KEY, GOOGLE_API_KEY, ANTHROPIC_API_KEY, or LLM=ollama:<model>"
+    echo ""
+    fi
 fi
 
 # Check if Docker is running
@@ -82,7 +108,7 @@ echo ""
 echo -e "${GREEN}SupoClip is starting up!${NC}"
 echo ""
 echo "Services will be available at:"
-echo "  - Frontend:  http://localhost:3000"
+echo "  - Frontend:  http://localhost:3107"
 echo "  - Backend:   http://localhost:8000"
 echo "  - API Docs:  http://localhost:8000/docs"
 echo ""
@@ -102,7 +128,7 @@ if $DOCKER_COMPOSE ps | grep -q "Up"; then
     echo -e "${GREEN}Services are starting successfully!${NC}"
     echo ""
     echo "You can now:"
-    echo "  1. Open http://localhost:3000 in your browser"
+    echo "  1. Open http://localhost:3107 in your browser"
     echo "  2. View logs: $DOCKER_COMPOSE logs -f"
     echo "  3. Stop services: $DOCKER_COMPOSE down"
 else

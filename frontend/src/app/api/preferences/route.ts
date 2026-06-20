@@ -1,14 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
-import { headers } from "next/headers";
-import prisma from "@/lib/prisma";
+import { getPrismaClient } from "@/server/prisma";
+import { getServerSession } from "@/server/session";
 
 // GET /api/preferences - Get user preferences
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
-    const session = await auth.api.getSession({
-      headers: await headers(),
-    });
+    const session = await getServerSession();
 
     if (!session?.user?.id) {
       return NextResponse.json(
@@ -17,12 +14,14 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const prisma = getPrismaClient();
     const user = await prisma.user.findUnique({
       where: { id: session.user.id },
       select: {
         default_font_family: true,
         default_font_size: true,
         default_font_color: true,
+        notify_on_completion: true,
       },
     });
 
@@ -37,6 +36,7 @@ export async function GET(request: NextRequest) {
       fontFamily: user.default_font_family || "TikTokSans-Regular",
       fontSize: user.default_font_size || 24,
       fontColor: user.default_font_color || "#FFFFFF",
+      notifyOnCompletion: user.notify_on_completion ?? true,
     });
   } catch (error) {
     console.error("Error fetching preferences:", error);
@@ -50,9 +50,7 @@ export async function GET(request: NextRequest) {
 // PATCH /api/preferences - Update user preferences
 export async function PATCH(request: NextRequest) {
   try {
-    const session = await auth.api.getSession({
-      headers: await headers(),
-    });
+    const session = await getServerSession();
 
     if (!session?.user?.id) {
       return NextResponse.json(
@@ -62,7 +60,7 @@ export async function PATCH(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { fontFamily, fontSize, fontColor } = body;
+    const { fontFamily, fontSize, fontColor, notifyOnCompletion } = body;
 
     // Validate inputs
     if (fontFamily && typeof fontFamily !== "string") {
@@ -86,17 +84,32 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
+    if (
+      notifyOnCompletion !== undefined &&
+      typeof notifyOnCompletion !== "boolean"
+    ) {
+      return NextResponse.json(
+        { error: "Invalid notifyOnCompletion" },
+        { status: 400 }
+      );
+    }
+
+    const prisma = getPrismaClient();
     const updatedUser = await prisma.user.update({
       where: { id: session.user.id },
       data: {
         ...(fontFamily !== undefined && { default_font_family: fontFamily }),
         ...(fontSize !== undefined && { default_font_size: fontSize }),
         ...(fontColor !== undefined && { default_font_color: fontColor }),
+        ...(notifyOnCompletion !== undefined && {
+          notify_on_completion: notifyOnCompletion,
+        }),
       },
       select: {
         default_font_family: true,
         default_font_size: true,
         default_font_color: true,
+        notify_on_completion: true,
       },
     });
 
@@ -104,6 +117,7 @@ export async function PATCH(request: NextRequest) {
       fontFamily: updatedUser.default_font_family,
       fontSize: updatedUser.default_font_size,
       fontColor: updatedUser.default_font_color,
+      notifyOnCompletion: updatedUser.notify_on_completion,
     });
   } catch (error) {
     console.error("Error updating preferences:", error);

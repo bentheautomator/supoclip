@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Input } from "@/components/ui/input";
 import {
   Scissors,
   Sparkles,
@@ -24,9 +23,15 @@ import {
   Wand2,
   ChevronDown,
   ExternalLink,
-  CheckCircle,
+  Check,
+  Zap,
+  Menu,
+  X,
 } from "lucide-react";
 import { isLandingOnlyModeEnabled } from "@/lib/app-flags";
+import { getPublicBillingPlans } from "@/lib/billing-plans";
+
+const HOSTED_APP_URL = "https://supoclip.com";
 
 function ScrollReveal({
   children,
@@ -110,6 +115,44 @@ const FEATURES = [
   },
 ];
 
+function getPlans() {
+  return [
+    {
+      name: "Self-Hosted",
+      price: "$0",
+      period: "forever",
+      description: "Run on your own infrastructure with full control.",
+      features: [
+        "Face-centered cropping",
+        "Word-synced subtitles",
+        "Virality scoring",
+        "All export presets",
+        "Full source code access",
+      ],
+      cta: "View on GitHub",
+      ctaHref: "https://github.com/FujiwaraChoki/supoclip",
+      highlighted: false,
+    },
+    ...getPublicBillingPlans().map((plan) => ({
+      name: plan.name,
+      price: `$${plan.priceMonthly}`,
+      period: "/month",
+      description: plan.description,
+      features: [
+        `${plan.generationLimit} generations per month`,
+        "Everything in Free",
+        "B-Roll overlays",
+        "Caption templates",
+        "Platform export presets",
+        ...(plan.id === "scale" ? ["Priority processing"] : ["Early access to new features"]),
+      ],
+      cta: plan.cta,
+      ctaHref: "",
+      highlighted: plan.highlighted,
+    })),
+  ];
+}
+
 const STEPS = [
   {
     num: "01",
@@ -136,9 +179,7 @@ const STEPS = [
 
 export default function LandingPage() {
   const [scrolled, setScrolled] = useState(false);
-  const [email, setEmail] = useState("");
-  const [isSubmittingWaitlist, setIsSubmittingWaitlist] = useState(false);
-  const [waitlistSubmitted, setWaitlistSubmitted] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const authEnabled = !isLandingOnlyModeEnabled;
 
   useEffect(() => {
@@ -146,33 +187,6 @@ export default function LandingPage() {
     window.addEventListener("scroll", handleScroll, { passive: true });
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
-
-  const handleWaitlistSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!email.trim()) return;
-
-    try {
-      setIsSubmittingWaitlist(true);
-      const response = await fetch("/api/waitlist", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email: email.trim() }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to join waitlist");
-      }
-
-      setWaitlistSubmitted(true);
-      setEmail("");
-    } catch (error) {
-      console.error("Failed to join waitlist:", error);
-    } finally {
-      setIsSubmittingWaitlist(false);
-    }
-  };
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -218,6 +232,12 @@ export default function LandingPage() {
               Features
             </a>
             <a
+              href="#pricing"
+              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Pricing
+            </a>
+            <a
               href="#open-source"
               className="text-sm text-muted-foreground hover:text-foreground transition-colors"
             >
@@ -225,7 +245,8 @@ export default function LandingPage() {
             </a>
           </div>
 
-          <div className="flex items-center gap-3">
+          {/* Desktop auth buttons */}
+          <div className="hidden md:flex items-center gap-3">
             {authEnabled ? (
               <>
                 <Link href="/sign-in">
@@ -238,10 +259,84 @@ export default function LandingPage() {
                 </Link>
               </>
             ) : (
-              <Badge variant="secondary">Temporarily unavailable</Badge>
+              <a href={HOSTED_APP_URL} target="_blank" rel="noopener noreferrer">
+                <Button size="sm">
+                  Open Hosted App
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </Button>
+              </a>
             )}
           </div>
+
+          {/* Mobile hamburger */}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setMobileNavOpen(!mobileNavOpen)}
+            className="md:hidden p-2"
+            aria-label="Toggle menu"
+          >
+            {mobileNavOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+          </Button>
         </div>
+
+        {/* Mobile nav dropdown */}
+        {mobileNavOpen && (
+          <div className="md:hidden border-t bg-background/95 backdrop-blur-xl">
+            <div className="max-w-6xl mx-auto px-6 py-4 space-y-1">
+              <a
+                href="#how-it-works"
+                onClick={() => setMobileNavOpen(false)}
+                className="block rounded-lg px-3 py-2.5 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+              >
+                How It Works
+              </a>
+              <a
+                href="#features"
+                onClick={() => setMobileNavOpen(false)}
+                className="block rounded-lg px-3 py-2.5 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+              >
+                Features
+              </a>
+              <a
+                href="#pricing"
+                onClick={() => setMobileNavOpen(false)}
+                className="block rounded-lg px-3 py-2.5 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+              >
+                Pricing
+              </a>
+              <a
+                href="#open-source"
+                onClick={() => setMobileNavOpen(false)}
+                className="block rounded-lg px-3 py-2.5 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+              >
+                Open Source
+              </a>
+              <Separator className="my-2" />
+              <div className="flex flex-col gap-2 px-3 pt-1">
+                {authEnabled ? (
+                  <>
+                    <Link href="/sign-in" onClick={() => setMobileNavOpen(false)}>
+                      <Button variant="outline" size="sm" className="w-full">
+                        Sign In
+                      </Button>
+                    </Link>
+                    <Link href="/sign-up" onClick={() => setMobileNavOpen(false)}>
+                      <Button size="sm" className="w-full">Get Started</Button>
+                    </Link>
+                  </>
+                ) : (
+                  <a href={HOSTED_APP_URL} target="_blank" rel="noopener noreferrer">
+                    <Button size="sm" className="w-full">
+                      Open Hosted App
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </Button>
+                  </a>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </nav>
 
       {/* ─── HERO ─── */}
@@ -307,9 +402,10 @@ export default function LandingPage() {
                     </Button>
                   </Link>
                 ) : (
-                  <a href="#waitlist">
+                  <a href={HOSTED_APP_URL} target="_blank" rel="noopener noreferrer">
                     <Button size="lg" className="px-8 h-12 text-sm">
-                      Join Waitlist
+                      Use Hosted App
+                      <ExternalLink className="w-4 h-4" />
                     </Button>
                   </a>
                 )}
@@ -456,6 +552,191 @@ export default function LandingPage() {
 
       <Separator />
 
+      {/* ─── PRICING ─── */}
+      <section id="pricing" className="relative py-20 md:py-28 bg-muted/40 overflow-hidden">
+        {/* Decorative background grain */}
+        <div
+          className="absolute inset-0 opacity-[0.03] pointer-events-none"
+          style={{
+            backgroundImage:
+              "radial-gradient(circle at 2px 2px, currentColor 0.5px, transparent 0)",
+            backgroundSize: "24px 24px",
+          }}
+        />
+
+        <div className="relative max-w-5xl mx-auto px-6">
+          <ScrollReveal className="text-center mb-16">
+            <p className="text-xs font-semibold tracking-[0.2em] uppercase text-muted-foreground mb-3">
+              Pricing
+            </p>
+            <h2
+              className="text-3xl sm:text-4xl font-bold tracking-tight mb-4"
+              style={{
+                fontFamily:
+                  "var(--font-syne), var(--font-geist-sans), system-ui",
+              }}
+            >
+              Simple pricing, no surprises
+            </h2>
+            <p className="text-sm text-muted-foreground max-w-md mx-auto">
+              Start free. Upgrade when you need more generations.
+              Self-hosters get everything free, always.
+            </p>
+          </ScrollReveal>
+
+          <div className="grid md:grid-cols-3 gap-6 max-w-5xl mx-auto items-start">
+            {getPlans().map((plan, i) => (
+              <ScrollReveal key={plan.name} delay={i * 0.12}>
+                <Card
+                  className={`relative py-0 gap-0 transition-all duration-300 hover:shadow-lg ${
+                    plan.highlighted
+                      ? "bg-primary text-primary-foreground border-primary shadow-xl md:-mt-4 md:mb-4"
+                      : "hover:-translate-y-1"
+                  }`}
+                >
+                  {plan.highlighted && (
+                    <div className="absolute -top-3.5 left-1/2 -translate-x-1/2">
+                      <Badge className="bg-foreground text-background border-0 shadow-md gap-1.5 px-3 py-1">
+                        <Zap className="w-3 h-3" />
+                        Most Popular
+                      </Badge>
+                    </div>
+                  )}
+
+                  <CardContent className="p-8">
+                    <div className="mb-6">
+                      <h3
+                        className="text-lg font-semibold mb-1"
+                        style={{ fontFamily: "var(--font-syne), system-ui" }}
+                      >
+                        {plan.name}
+                      </h3>
+                      <p
+                        className={`text-sm ${
+                          plan.highlighted
+                            ? "text-primary-foreground/70"
+                            : "text-muted-foreground"
+                        }`}
+                      >
+                        {plan.description}
+                      </p>
+                    </div>
+
+                    <div className="flex items-baseline gap-1 mb-8">
+                      <span
+                        className="text-5xl font-extrabold tracking-tight"
+                        style={{ fontFamily: "var(--font-syne), system-ui" }}
+                      >
+                        {plan.price}
+                      </span>
+                      <span
+                        className={`text-sm ${
+                          plan.highlighted
+                            ? "text-primary-foreground/60"
+                            : "text-muted-foreground"
+                        }`}
+                      >
+                        {plan.period}
+                      </span>
+                    </div>
+
+                    <ul className="space-y-3 mb-8">
+                      {plan.features.map((feature) => (
+                        <li key={feature} className="flex items-start gap-3 text-sm">
+                          <Check
+                            className={`w-4 h-4 mt-0.5 shrink-0 ${
+                              plan.highlighted
+                                ? "text-primary-foreground/80"
+                                : "text-muted-foreground"
+                            }`}
+                          />
+                          <span
+                            className={
+                              plan.highlighted
+                                ? "text-primary-foreground/90"
+                                : ""
+                            }
+                          >
+                            {feature}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+
+                    {plan.ctaHref ? (
+                      <a
+                        href={plan.ctaHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        <Button
+                          className="w-full h-11 text-sm"
+                          variant="outline"
+                          size="lg"
+                        >
+                          <Github className="w-4 h-4" />
+                          {plan.cta}
+                          <ExternalLink className="w-3.5 h-3.5 opacity-50" />
+                        </Button>
+                      </a>
+                    ) : authEnabled ? (
+                      <Link href="/sign-up">
+                        <Button
+                          className={`w-full h-11 text-sm ${
+                            plan.highlighted
+                              ? "bg-primary-foreground text-primary hover:bg-primary-foreground/90"
+                              : ""
+                          }`}
+                          variant={plan.highlighted ? "secondary" : "default"}
+                          size="lg"
+                        >
+                          {plan.cta}
+                          <ArrowRight className="w-4 h-4" />
+                        </Button>
+                      </Link>
+                    ) : (
+                      <a
+                        href={HOSTED_APP_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        <Button
+                          className={`w-full h-11 text-sm ${
+                            plan.highlighted
+                              ? "bg-primary-foreground text-primary hover:bg-primary-foreground/90"
+                              : ""
+                          }`}
+                          variant={plan.highlighted ? "secondary" : "default"}
+                          size="lg"
+                        >
+                          Use Hosted App
+                          <ExternalLink className="w-4 h-4" />
+                        </Button>
+                      </a>
+                    )}
+                  </CardContent>
+                </Card>
+              </ScrollReveal>
+            ))}
+          </div>
+
+          <ScrollReveal delay={0.3}>
+            <p className="text-center text-xs text-muted-foreground mt-10 max-w-md mx-auto">
+              Self-hosting? All features are free and unlimited.{" "}
+              <a
+                href="#open-source"
+                className="underline underline-offset-2 hover:text-foreground transition-colors"
+              >
+                See setup instructions
+              </a>
+              .
+            </p>
+          </ScrollReveal>
+        </div>
+      </section>
+
+      <Separator />
+
       {/* ─── OPEN SOURCE ─── */}
       <section id="open-source" className="py-20 md:py-28 bg-muted/40">
         <div className="max-w-3xl mx-auto px-6">
@@ -521,8 +802,11 @@ export default function LandingPage() {
                       </Button>
                     </Link>
                   ) : (
-                    <a href="#waitlist">
-                      <Button variant="outline">Join Waitlist</Button>
+                    <a href={HOSTED_APP_URL} target="_blank" rel="noopener noreferrer">
+                      <Button variant="outline">
+                        Open hosted version
+                        <ExternalLink className="w-4 h-4" />
+                      </Button>
                     </a>
                   )}
                 </div>
@@ -555,70 +839,16 @@ export default function LandingPage() {
               </Button>
             </Link>
           ) : (
-            <a href="#waitlist">
+            <a href={HOSTED_APP_URL} target="_blank" rel="noopener noreferrer">
               <Button size="lg" className="px-10 h-12 text-sm">
-                Join the Waitlist
+                Open Hosted App
+                <ExternalLink className="w-4 h-4" />
               </Button>
             </a>
           )}
         </ScrollReveal>
       </section>
 
-      {!authEnabled && (
-        <>
-          <Separator />
-          <section id="waitlist" className="py-20 md:py-28 bg-muted/40">
-            <div className="max-w-3xl mx-auto px-6">
-              <ScrollReveal className="text-center mb-10">
-                <Badge variant="secondary" className="mb-6">
-                  Early Access
-                </Badge>
-                <h2
-                  className="text-3xl sm:text-4xl font-bold tracking-tight mb-4"
-                  style={{ fontFamily: "var(--font-syne), system-ui" }}
-                >
-                  Join the SupoClip waitlist
-                </h2>
-                <p className="text-sm text-muted-foreground max-w-lg mx-auto">
-                  Get launch updates and first access once hosted signups are reopened.
-                </p>
-              </ScrollReveal>
-
-              <ScrollReveal delay={0.1}>
-                <Card className="py-0 gap-0">
-                  <CardContent className="p-6 md:p-8">
-                    {waitlistSubmitted ? (
-                      <div className="flex flex-col items-center text-center gap-3">
-                        <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center">
-                          <CheckCircle className="w-6 h-6 text-primary" />
-                        </div>
-                        <h3 className="text-xl font-semibold">You are on the list.</h3>
-                        <p className="text-sm text-muted-foreground">
-                          Thanks for joining. We will email you when SupoClip opens again.
-                        </p>
-                      </div>
-                    ) : (
-                      <form onSubmit={handleWaitlistSubmit} className="space-y-4">
-                        <Input
-                          type="email"
-                          value={email}
-                          onChange={(event) => setEmail(event.target.value)}
-                          placeholder="you@company.com"
-                          className="h-12"
-                          required
-                        />
-                        <Button type="submit" className="w-full h-12" disabled={isSubmittingWaitlist}>
-                          {isSubmittingWaitlist ? "Joining..." : "Join Waitlist"}
-                        </Button>
-                      </form>
-                    )}
-                  </CardContent>
-                </Card>
-              </ScrollReveal>
-            </div>
-          </section>
-        </>
-      )}
 
       {/* ─── FOOTER ─── */}
       <footer className="border-t py-8 px-6">

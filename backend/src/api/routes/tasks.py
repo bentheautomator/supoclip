@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
+from pathlib import Path
 import json
 import logging
 from typing import Dict, Any
@@ -16,16 +17,18 @@ from ...database import get_db
 from ...database import AsyncSessionLocal
 from ...services.task_service import TaskService
 from ...services.billing_service import BillingService, BillingLimitExceeded
-from ...auth_headers import get_signed_user_id
+from ...auth_headers import get_authenticated_user_id
 from ...workers.job_queue import JobQueue
 from ...workers.progress import ProgressTracker
-from ...config import Config
+from ...config import get_config
 from ...font_registry import is_font_accessible
+from ...clip_cleanup import normalize_clip_cleanup_settings
+from ...video_utils import VALID_OUTPUT_FORMATS
+from ...admin_auth import require_admin_user
 import redis.asyncio as redis
 from ...clip_editor import export_with_preset, EXPORT_PRESETS
 
 logger = logging.getLogger(__name__)
-config = Config()
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 
@@ -49,16 +52,87 @@ def _normalize_font_family(value: Any, default: str = "TikTokSans-Regular") -> s
     return default
 
 
+def _get_user_id_from_headers(request: Request) -> str:
+    """Get the authenticated user ID from trusted frontend headers."""
+    config = get_config()
+    return get_authenticated_user_id(request, config)
+
+
+async def _load_task_source_metadata(task_id: str) -> Dict[str, Any]:
+    runtime_config = get_config()
+    redis_client = redis.Redis(
+        host=runtime_config.redis_host,
+        port=runtime_config.redis_port,
+        password=runtime_config.redis_password,
+        decode_responses=True,
+    )
+    try:
+        payload = await redis_client.get(f"task_source:{task_id}")
+    except Exception as exc:
+        logger.warning("Unable to load task source metadata for %s: %s", task_id, exc)
+        return {}
+    finally:
+        await redis_client.aclose()
+
+    if not payload:
+        return {}
+
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return {}
+
+
+async def _save_task_source_metadata(task_id: str, payload: Dict[str, Any]) -> None:
+    runtime_config = get_config()
+    redis_client = redis.Redis(
+        host=runtime_config.redis_host,
+        port=runtime_config.redis_port,
+        password=runtime_config.redis_password,
+        decode_responses=True,
+    )
+    try:
+        await redis_client.set(
+            f"task_source:{task_id}",
+            json.dumps(payload),
+            ex=60 * 60 * 24 * 7,
+        )
+    except Exception as exc:
+        logger.warning("Unable to save task source metadata for %s: %s", task_id, exc)
+    finally:
+        await redis_client.aclose()
+
+
+def _merge_task_source_metadata(
+    existing: Dict[str, Any] | None,
+    *,
+    source_url: Any = None,
+    source_type: Any = None,
+    output_format: Any = None,
+    add_subtitles: Any = None,
+    cleanup_settings: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    merged = dict(existing or {})
+
+    if isinstance(source_url, str) and source_url:
+        merged["url"] = source_url
+    if isinstance(source_type, str) and source_type:
+        merged["source_type"] = source_type
+    if output_format in VALID_OUTPUT_FORMATS:
+        merged["output_format"] = output_format
+    if isinstance(add_subtitles, bool):
+        merged["add_subtitles"] = add_subtitles
+    if cleanup_settings:
+        merged.update(cleanup_settings)
+
+    return merged
+
+
 async def _require_task_owner(
     request: Request, task_service: TaskService, db: AsyncSession, task_id: str
 ):
     """Ensure authenticated user owns the task."""
-    user_id = request.headers.get("user_id")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User authentication required")
-
-    if not is_font_accessible(font_family, user_id):
-        raise HTTPException(status_code=400, detail="Selected font is not available")
+    user_id = _get_user_id_from_headers(request)
 
     task = await task_service.task_repo.get_task_by_id(db, task_id)
     if not task:
@@ -77,11 +151,7 @@ async def list_tasks(
     """
     Get all tasks for the authenticated user.
     """
-    headers = request.headers
-    user_id = headers.get("user_id")
-
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User authentication required")
+    user_id = _get_user_id_from_headers(request)
 
     try:
         task_service = TaskService(db)
@@ -101,13 +171,9 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     Returns task_id immediately.
     """
     data = await request.json()
-    headers = request.headers
 
     raw_source = data.get("source")
-    if config.monetization_enabled:
-        user_id = get_signed_user_id(request, config)
-    else:
-        user_id = headers.get("user_id")
+    user_id = _get_user_id_from_headers(request)
 
     # Get font options
     font_options = data.get("font_options", {})
@@ -118,15 +184,26 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     font_color = _normalize_font_color(font_options.get("font_color", "#FFFFFF"))
     caption_template = data.get("caption_template", "default")
     include_broll = data.get("include_broll", False)
-    processing_mode = data.get("processing_mode", config.default_processing_mode)
+    runtime_config = get_config()
+    processing_mode = data.get(
+        "processing_mode", runtime_config.default_processing_mode
+    )
     if processing_mode not in {"fast", "balanced", "quality"}:
-        processing_mode = config.default_processing_mode
-
+        processing_mode = runtime_config.default_processing_mode
+    output_format = data.get("output_format", "vertical")
+    if output_format not in VALID_OUTPUT_FORMATS:
+        output_format = "vertical"
+    add_subtitles = data.get("add_subtitles", True)
+    if not isinstance(add_subtitles, bool):
+        add_subtitles = True
+    cleanup_settings = normalize_clip_cleanup_settings(
+        data.get("cut_long_pauses"),
+        data.get("pause_threshold_ms"),
+        data.get("remove_filler_words"),
+        data.get("filtered_words"),
+    )
     if not raw_source or not raw_source.get("url"):
         raise HTTPException(status_code=400, detail="Source URL is required")
-
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User authentication required")
 
     try:
         billing_service = BillingService(db)
@@ -153,7 +230,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
         )
 
         # Enqueue job for worker
-        job_id = await JobQueue.enqueue_processing_job(
+        queue_adapter = getattr(request.app.state, "queue_adapter", JobQueue)
+        job_id = await queue_adapter.enqueue_processing_job(
             "process_video_task",
             processing_mode,
             task_id,
@@ -165,20 +243,23 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             font_color,
             caption_template,
             processing_mode,
+            output_format,
+            add_subtitles,
+            cleanup_settings,
         )
 
         # Save source metadata for resume/retries in environments without sources.url column
-        redis_client = redis.Redis(
-            host=config.redis_host, port=config.redis_port, decode_responses=True
+        await _save_task_source_metadata(
+            task_id,
+            _merge_task_source_metadata(
+                None,
+                source_url=raw_source["url"],
+                source_type=source_type,
+                output_format=output_format,
+                add_subtitles=add_subtitles,
+                cleanup_settings=cleanup_settings,
+            ),
         )
-        try:
-            await redis_client.set(
-                f"task_source:{task_id}",
-                json.dumps({"url": raw_source["url"], "source_type": source_type}),
-                ex=60 * 60 * 24 * 7,
-            )
-        finally:
-            await redis_client.close()
 
         logger.info(f"Task {task_id} created and job {job_id} enqueued")
 
@@ -195,7 +276,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             status_code=402,
             detail={
                 "code": "SUBSCRIPTION_REQUIRED",
-                "message": "Active subscription required to create tasks.",
+                "message": "Choose a paid plan to process videos.",
                 "billing": e.summary,
             },
         )
@@ -207,12 +288,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
 @router.get("/billing/summary")
 async def get_billing_summary(request: Request, db: AsyncSession = Depends(get_db)):
     """Get monetization status and current usage for authenticated user."""
-    if config.monetization_enabled:
-        user_id = get_signed_user_id(request, config)
-    else:
-        user_id = request.headers.get("user_id")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User authentication required")
+    user_id = _get_user_id_from_headers(request)
 
     try:
         billing_service = BillingService(db)
@@ -229,10 +305,13 @@ async def get_billing_summary(request: Request, db: AsyncSession = Depends(get_d
 
 
 @router.get("/{task_id}")
-async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
+async def get_task(
+    task_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
     """Get task details."""
     try:
         task_service = TaskService(db)
+        await _require_task_owner(request, task_service, db, task_id)
         task = await task_service.get_task_with_clips(task_id)
 
         if not task:
@@ -248,10 +327,13 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{task_id}/clips")
-async def get_task_clips(task_id: str, db: AsyncSession = Depends(get_db)):
+async def get_task_clips(
+    task_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
     """Get all clips for a task."""
     try:
         task_service = TaskService(db)
+        await _require_task_owner(request, task_service, db, task_id)
         task = await task_service.get_task_with_clips(task_id)
 
         if not task:
@@ -271,23 +353,26 @@ async def get_task_clips(task_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{task_id}/progress")
-async def get_task_progress_sse(task_id: str):
+async def get_task_progress_sse(task_id: str, request: Request):
     """
     SSE endpoint for real-time progress updates.
     Streams progress updates as Server-Sent Events.
     """
 
+    user_id = _get_user_id_from_headers(request)
+
+    async with AsyncSessionLocal() as local_db:
+        task_service = TaskService(local_db)
+        task = await task_service.task_repo.get_task_by_id(local_db, task_id)
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if task.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this task")
+
     async def event_generator():
         """Generate SSE events for task progress."""
-        # First, check if task exists
-        async with AsyncSessionLocal() as local_db:
-            task_service = TaskService(local_db)
-            task = await task_service.task_repo.get_task_by_id(local_db, task_id)
-
-        if not task:
-            yield {"event": "error", "data": json.dumps({"error": "Task not found"})}
-            return
-
         # Send initial task status
         yield {
             "event": "status",
@@ -307,8 +392,12 @@ async def get_task_progress_sse(task_id: str):
             return
 
         # Connect to Redis for real-time updates
+        runtime_config = get_config()
         redis_client = redis.Redis(
-            host=config.redis_host, port=config.redis_port, decode_responses=True
+            host=runtime_config.redis_host,
+            port=runtime_config.redis_port,
+            password=runtime_config.redis_password,
+            decode_responses=True,
         )
 
         try:
@@ -316,7 +405,8 @@ async def get_task_progress_sse(task_id: str):
             async for progress_data in ProgressTracker.subscribe_to_progress(
                 redis_client, task_id
             ):
-                yield {"event": "progress", "data": json.dumps(progress_data)}
+                event_type = progress_data.get("event_type", "progress")
+                yield {"event": event_type, "data": json.dumps(progress_data)}
 
                 # Close connection if task is done
                 if progress_data.get("status") in ["completed", "error"]:
@@ -346,10 +436,7 @@ async def update_task(
 
         task_service = TaskService(db)
 
-        # Get task to verify it exists
-        task = await task_service.task_repo.get_task_by_id(db, task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
+        task = await _require_task_owner(request, task_service, db, task_id)
 
         # Update source title
         await task_service.source_repo.update_source_title(db, task["source_id"], title)
@@ -369,12 +456,7 @@ async def delete_task(
 ):
     """Delete a task and all its associated clips."""
     try:
-        headers = request.headers
-        user_id = headers.get("user_id")
-
-        if not user_id:
-            raise HTTPException(status_code=401, detail="User authentication required")
-
+        user_id = _get_user_id_from_headers(request)
         task_service = TaskService(db)
 
         # Get task to verify ownership
@@ -405,12 +487,7 @@ async def delete_clip(
 ):
     """Delete a specific clip."""
     try:
-        headers = request.headers
-        user_id = headers.get("user_id")
-
-        if not user_id:
-            raise HTTPException(status_code=401, detail="User authentication required")
-
+        user_id = _get_user_id_from_headers(request)
         task_service = TaskService(db)
 
         # Verify task ownership
@@ -433,6 +510,36 @@ async def delete_clip(
     except Exception as e:
         logger.error(f"Error deleting clip: {e}")
         raise HTTPException(status_code=500, detail=f"Error deleting clip: {str(e)}")
+
+
+@router.get("/{task_id}/clips/{clip_id}/file")
+async def get_clip_file(
+    task_id: str, clip_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
+    """Serve a clip file after verifying task ownership."""
+    try:
+        task_service = TaskService(db)
+        await _require_task_owner(request, task_service, db, task_id)
+        clip = await task_service.clip_repo.get_clip_by_id(db, clip_id)
+        if not clip or clip.get("task_id") != task_id:
+            raise HTTPException(status_code=404, detail="Clip not found")
+
+        clip_path = Path(clip["file_path"])
+        if not clip_path.exists():
+            raise HTTPException(status_code=404, detail="Clip file not found")
+
+        return FileResponse(
+            path=str(clip_path),
+            media_type="video/mp4",
+            filename=clip["filename"],
+            content_disposition_type="inline",
+            headers={"Cache-Control": "private, no-store"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error serving clip file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error serving clip file: {str(e)}")
 
 
 @router.patch("/{task_id}/clips/{clip_id}")
@@ -591,6 +698,12 @@ async def apply_task_settings(
         caption_template = payload.get("caption_template", "default")
         include_broll = bool(payload.get("include_broll", False))
         apply_to_existing = bool(payload.get("apply_to_existing", False))
+        cleanup_settings = normalize_clip_cleanup_settings(
+            payload.get("cut_long_pauses"),
+            payload.get("pause_threshold_ms"),
+            payload.get("remove_filler_words"),
+            payload.get("filtered_words"),
+        )
 
         task_service = TaskService(db)
         await _require_task_owner(request, task_service, db, task_id)
@@ -609,6 +722,23 @@ async def apply_task_settings(
             caption_template,
             include_broll,
             apply_to_existing,
+            cleanup_settings,
+        )
+        metadata = await _load_task_source_metadata(task_id)
+        await _save_task_source_metadata(
+            task_id,
+            _merge_task_source_metadata(
+                metadata,
+                source_url=metadata.get("url") or task_record.get("source_url"),
+                source_type=metadata.get("source_type") or task_record.get("source_type"),
+                output_format=metadata.get("output_format") or task.get("output_format"),
+                add_subtitles=(
+                    metadata["add_subtitles"]
+                    if isinstance(metadata.get("add_subtitles"), bool)
+                    else task.get("add_subtitles")
+                ),
+                cleanup_settings=cleanup_settings,
+            ),
         )
         return {"task": task, "message": "Task settings updated"}
     except ValueError as e:
@@ -647,9 +777,10 @@ async def export_clip(
 
         from pathlib import Path
 
+        runtime_config = get_config()
         output_path = export_with_preset(
             Path(clip["file_path"]),
-            Path(config.temp_dir) / "exports",
+            Path(runtime_config.temp_dir) / "exports",
             preset_name,
         )
 
@@ -676,8 +807,12 @@ async def cancel_task(
         if task.get("status") in ["completed", "error", "cancelled"]:
             return {"message": f"Task already in terminal state: {task.get('status')}"}
 
+        runtime_config = get_config()
         redis_client = redis.Redis(
-            host=config.redis_host, port=config.redis_port, decode_responses=True
+            host=runtime_config.redis_host,
+            port=runtime_config.redis_port,
+            password=runtime_config.redis_password,
+            decode_responses=True,
         )
         try:
             await redis_client.setex(f"task_cancel:{task_id}", 3600, "1")
@@ -701,11 +836,16 @@ async def cancel_task(
 
 
 @router.get("/metrics/performance")
-async def get_performance_metrics(db: AsyncSession = Depends(get_db)):
+async def get_performance_metrics(
+    request: Request, db: AsyncSession = Depends(get_db)
+):
     """Get aggregate processing performance metrics by mode."""
     try:
+        await require_admin_user(request, db, get_config())
         task_service = TaskService(db)
         return await task_service.get_performance_metrics()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error loading performance metrics: {e}")
         raise HTTPException(status_code=500, detail=f"Error loading metrics: {str(e)}")
@@ -728,26 +868,36 @@ async def resume_task(
 
         source_url = task.get("source_url")
         source_type = task.get("source_type")
+        output_format = "vertical"
+        add_subtitles = True
 
-        if not source_url or not source_type:
-            redis_client = redis.Redis(
-                host=config.redis_host, port=config.redis_port, decode_responses=True
-            )
-            try:
-                source_payload = await redis_client.get(f"task_source:{task_id}")
-            finally:
-                await redis_client.close()
-
-            if source_payload:
-                parsed = json.loads(source_payload)
-                source_url = parsed.get("url")
-                source_type = parsed.get("source_type")
+        metadata = await _load_task_source_metadata(task_id)
+        if not source_url:
+            source_url = metadata.get("url")
+        if not source_type:
+            source_type = metadata.get("source_type")
+        of = metadata.get("output_format", output_format)
+        if of in VALID_OUTPUT_FORMATS:
+            output_format = of
+        asub = metadata.get("add_subtitles", add_subtitles)
+        if isinstance(asub, bool):
+            add_subtitles = asub
+        cleanup_settings = normalize_clip_cleanup_settings(
+            metadata.get("cut_long_pauses"),
+            metadata.get("pause_threshold_ms"),
+            metadata.get("remove_filler_words"),
+            metadata.get("filtered_words"),
+        )
 
         if not source_url or not source_type:
             raise HTTPException(status_code=400, detail="Task source URL is missing")
 
+        runtime_config = get_config()
         redis_client = redis.Redis(
-            host=config.redis_host, port=config.redis_port, decode_responses=True
+            host=runtime_config.redis_host,
+            port=runtime_config.redis_port,
+            password=runtime_config.redis_password,
+            decode_responses=True,
         )
         try:
             await redis_client.delete(f"task_cancel:{task_id}")
@@ -762,7 +912,9 @@ async def resume_task(
             progress_message="Re-queued by user",
         )
 
-        processing_mode = task.get("processing_mode") or config.default_processing_mode
+        processing_mode = (
+            task.get("processing_mode") or runtime_config.default_processing_mode
+        )
 
         job_id = await JobQueue.enqueue_processing_job(
             "process_video_task",
@@ -776,6 +928,9 @@ async def resume_task(
             task.get("font_color") or "#FFFFFF",
             task.get("caption_template") or "default",
             processing_mode,
+            output_format,
+            add_subtitles,
+            cleanup_settings,
         )
 
         return {"message": "Task resumed", "job_id": job_id}
@@ -789,8 +944,12 @@ async def resume_task(
 @router.get("/dead-letter/list")
 async def list_dead_letter_tasks():
     """List tasks that exhausted retries and landed in dead-letter store."""
+    runtime_config = get_config()
     redis_client = redis.Redis(
-        host=config.redis_host, port=config.redis_port, decode_responses=True
+        host=runtime_config.redis_host,
+        port=runtime_config.redis_port,
+        password=runtime_config.redis_password,
+        decode_responses=True,
     )
     try:
         ids_result = redis_client.smembers("tasks:dead_letter")

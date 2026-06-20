@@ -8,9 +8,10 @@ Run SupoClip with Docker in just one command!
 2. **API Keys** (get these from the providers):
    - [AssemblyAI API Key](https://www.assemblyai.com/) (required for transcription)
    - At least one AI provider:
-     - [OpenAI API Key](https://platform.openai.com/api-keys) (recommended)
-     - [Google AI API Key](https://makersuite.google.com/app/apikey)
-     - [Anthropic API Key](https://console.anthropic.com/)
+      - [OpenAI API Key](https://platform.openai.com/api-keys) (recommended)
+      - [Google AI API Key](https://makersuite.google.com/app/apikey)
+      - [Anthropic API Key](https://console.anthropic.com/)
+      - [Ollama](https://ollama.com/) (local/self-hosted, no API key required for local)
 
 ## Quick Start (Single Command)
 
@@ -39,6 +40,15 @@ OPENAI_API_KEY=your_openai_key_here
 
 # Configure which AI model to use
 LLM=openai:gpt-4
+
+# OR use Ollama locally
+# LLM=ollama:gpt-oss:20b
+# OLLAMA_BASE_URL=http://localhost:11434/v1
+
+# Optional: Resend for waitlist + subscription lifecycle emails
+# Required if you want hosted billing emails when SELF_HOST=false
+# RESEND_API_KEY=your_resend_api_key_here
+# RESEND_FROM_EMAIL="SupoClip <onboarding@your-domain.com>"
 ```
 
 ### 2. Start SupoClip
@@ -78,8 +88,7 @@ docker-compose up -d --build
 | Variable | Description | Where to Get |
 |----------|-------------|--------------|
 | `ASSEMBLY_AI_API_KEY` | Speech-to-text transcription | https://www.assemblyai.com/ |
-| `OPENAI_API_KEY` | OpenAI GPT models | https://platform.openai.com/api-keys |
-| `LLM` | AI model identifier | e.g., `openai:gpt-4` |
+| `LLM` | AI model identifier | e.g., `openai:gpt-5.2` or `ollama:gpt-oss:20b` |
 
 ### Optional Variables
 
@@ -89,6 +98,32 @@ docker-compose up -d --build
 | `BETTER_AUTH_SECRET` | dev secret | Auth secret (change in production!) |
 | `GOOGLE_API_KEY` | - | For Google Gemini models |
 | `ANTHROPIC_API_KEY` | - | For Claude models |
+| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | For local/self-hosted Ollama endpoint |
+| `OLLAMA_API_KEY` | - | Optional, required for Ollama Cloud |
+| `RESEND_API_KEY` | - | Optional in self-host mode, required for hosted billing/waitlist emails |
+| `RESEND_FROM_EMAIL` | `SupoClip <onboarding@resend.dev>` | Verified sender for backend subscription emails |
+
+### Hosted Billing Email Setup
+
+If you enable hosted monetization with `SELF_HOST=false`, set these as well:
+
+| Variable | Description |
+|----------|-------------|
+| `BACKEND_AUTH_SECRET` | Shared secret used by frontend API routes to call the backend |
+| `STRIPE_SECRET_KEY` | Stripe server-side API key |
+| `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
+| `STRIPE_PRO_PRICE_ID` | Stripe price ID for the $10 Pro subscription |
+| `STRIPE_SCALE_PRICE_ID` | Stripe price ID for the $50 Scale subscription |
+| `STRIPE_PRICE_ID` | Legacy fallback Stripe price ID for the Pro subscription |
+| `PRO_PLAN_TASK_LIMIT` | Pro monthly generation limit, usually `50` |
+| `SCALE_PLAN_TASK_LIMIT` | Scale monthly generation limit, usually `300` |
+| `RESEND_API_KEY` | Resend API key used to send subscription emails |
+| `RESEND_FROM_EMAIL` | Verified sender address used for subscription emails |
+
+The billing flow sends:
+
+- A thank-you email after `checkout.session.completed`
+- A cancellation email after `customer.subscription.deleted`
 
 ## Supported AI Models
 
@@ -108,8 +143,14 @@ LLM=anthropic:claude-3-haiku
 
 ### Google
 ```bash
-LLM=google:gemini-1.5-pro
-LLM=google:gemini-pro
+LLM=google-gla:gemini-3-flash-preview
+LLM=google-gla:gemini-3-pro-preview
+```
+
+### Ollama
+```bash
+LLM=ollama:gpt-oss:20b
+OLLAMA_BASE_URL=http://localhost:11434/v1
 ```
 
 ## Troubleshooting

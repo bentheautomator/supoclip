@@ -1,8 +1,14 @@
 import { NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { buildBackendAuthHeaders } from "@/lib/backend-auth";
 import { monetizationEnabled } from "@/lib/monetization";
-import { getStripeClient } from "@/lib/stripe";
+import { fetchBackend } from "@/server/backend-api";
+import { getPlanIdForStripePrice, hasAnyConfiguredStripePrice } from "@/server/billing-plans";
+import { getPrismaClient } from "@/server/prisma";
+import { getServerStripeClient } from "@/server/stripe";
 import Stripe from "stripe";
+
+type SubscriptionEmailEvent = "subscribed" | "unsubscribed";
+const PAID_SUBSCRIPTION_STATUSES = new Set(["active", "trialing"]);
 
 function toDate(unixSeconds: number | null | undefined): Date | null {
   if (!unixSeconds) {
@@ -11,12 +17,19 @@ function toDate(unixSeconds: number | null | undefined): Date | null {
   return new Date(unixSeconds * 1000);
 }
 
-function isProSubscription(subscription: Stripe.Subscription, expectedPriceId: string): boolean {
-  const hasExpectedPrice = subscription.items.data.some(
-    (item) => item.price?.id === expectedPriceId
-  );
+function getPaidSubscriptionPlan(subscription: Stripe.Subscription): "pro" | "scale" | null {
+  if (!PAID_SUBSCRIPTION_STATUSES.has(subscription.status)) {
+    return null;
+  }
 
-  return hasExpectedPrice && (subscription.status === "active" || subscription.status === "trialing");
+  for (const item of subscription.items.data) {
+    const plan = getPlanIdForStripePrice(item.price?.id);
+    if (plan) {
+      return plan;
+    }
+  }
+
+  return null;
 }
 
 function getSubscriptionPeriod(subscription: Stripe.Subscription): {
@@ -36,13 +49,14 @@ function getSubscriptionPeriod(subscription: Stripe.Subscription): {
   };
 }
 
-async function upsertSubscriptionState(subscription: Stripe.Subscription, expectedPriceId: string) {
+async function upsertSubscriptionState(subscription: Stripe.Subscription) {
+  const prisma = getPrismaClient();
   const customerId = typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id;
   const subscriptionId = subscription.id;
   const status = subscription.status;
   const { currentPeriodStart, currentPeriodEnd } = getSubscriptionPeriod(subscription);
 
-  const plan = isProSubscription(subscription, expectedPriceId) ? "pro" : "free";
+  const plan = getPaidSubscriptionPlan(subscription) || "free";
 
   await prisma.user.updateMany({
     where: { stripe_customer_id: customerId },
@@ -57,7 +71,43 @@ async function upsertSubscriptionState(subscription: Stripe.Subscription, expect
   });
 }
 
-async function handleCheckoutCompleted(session: Stripe.Checkout.Session, expectedPriceId: string) {
+async function sendBackendSubscriptionEmail(userId: string, event: SubscriptionEmailEvent) {
+  const response = await fetchBackend("/billing/subscription-email", {
+    method: "POST",
+    userId,
+    extraHeaders: {
+      ...buildBackendAuthHeaders(userId),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ event }),
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Backend subscription email failed with ${response.status}: ${detail || "unknown error"}`
+    );
+  }
+}
+
+async function sendSubscriptionEmailBestEffort(
+  userId: string,
+  event: SubscriptionEmailEvent
+) {
+  try {
+    await sendBackendSubscriptionEmail(userId, event);
+  } catch (error) {
+    console.error("Subscription email side effect failed", {
+      userId,
+      event,
+      error,
+    });
+  }
+}
+
+async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
+  const prisma = getPrismaClient();
   if (session.mode !== "subscription") {
     return;
   }
@@ -68,10 +118,23 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session, expecte
     return;
   }
 
-  const metadataUserId = session.metadata?.userId;
-  if (metadataUserId) {
+  let userId = session.metadata?.userId ?? null;
+  if (!userId) {
+    const customerEmail = session.customer_details?.email || session.customer_email || undefined;
+    const existingUser = await prisma.user.findFirst({
+      where: customerEmail
+        ? {
+            OR: [{ stripe_customer_id: customerId }, { email: customerEmail }],
+          }
+        : { stripe_customer_id: customerId },
+      select: { id: true },
+    });
+    userId = existingUser?.id ?? null;
+  }
+
+  if (userId) {
     await prisma.user.update({
-      where: { id: metadataUserId },
+      where: { id: userId },
       data: {
         stripe_customer_id: customerId,
         stripe_subscription_id: subscriptionId,
@@ -79,13 +142,22 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session, expecte
     });
   }
 
-  const stripe = getStripeClient();
+  const stripe = getServerStripeClient();
   const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-  await upsertSubscriptionState(subscription, expectedPriceId);
+  await upsertSubscriptionState(subscription);
+
+  if (userId && getPaidSubscriptionPlan(subscription)) {
+    await sendSubscriptionEmailBestEffort(userId, "subscribed");
+  }
 }
 
 async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
+  const prisma = getPrismaClient();
   const customerId = typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id;
+  const user = await prisma.user.findFirst({
+    where: { stripe_customer_id: customerId },
+    select: { id: true },
+  });
 
   await prisma.user.updateMany({
     where: { stripe_customer_id: customerId },
@@ -98,6 +170,10 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
       trial_ends_at: null,
     },
   });
+
+  if (user?.id) {
+    await sendSubscriptionEmailBestEffort(user.id, "unsubscribed");
+  }
 }
 
 export async function POST(request: Request) {
@@ -110,9 +186,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Webhook secret is not configured" }, { status: 500 });
   }
 
-  const expectedPriceId = process.env.STRIPE_PRICE_ID;
-  if (!expectedPriceId) {
-    return NextResponse.json({ error: "STRIPE_PRICE_ID is not configured" }, { status: 500 });
+  if (!hasAnyConfiguredStripePrice()) {
+    return NextResponse.json({ error: "No Stripe prices are configured" }, { status: 500 });
   }
 
   const signature = request.headers.get("stripe-signature");
@@ -121,7 +196,7 @@ export async function POST(request: Request) {
   }
 
   const payload = await request.text();
-  const stripe = getStripeClient();
+  const stripe = getServerStripeClient();
 
   let event: Stripe.Event;
   try {
@@ -131,7 +206,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    await prisma.stripeWebhookEvent.create({
+    await getPrismaClient().stripeWebhookEvent.create({
       data: {
         id: event.id,
         type: event.type,
@@ -147,18 +222,18 @@ export async function POST(request: Request) {
 
   try {
     if (event.type === "checkout.session.completed") {
-      await handleCheckoutCompleted(event.data.object as Stripe.Checkout.Session, expectedPriceId);
+      await handleCheckoutCompleted(event.data.object as Stripe.Checkout.Session);
     }
 
     if (event.type === "customer.subscription.updated") {
-      await upsertSubscriptionState(event.data.object as Stripe.Subscription, expectedPriceId);
+      await upsertSubscriptionState(event.data.object as Stripe.Subscription);
     }
 
     if (event.type === "customer.subscription.deleted") {
       await handleSubscriptionDeleted(event.data.object as Stripe.Subscription);
     }
   } catch (error) {
-    await prisma.stripeWebhookEvent.delete({ where: { id: event.id } }).catch(() => {});
+    await getPrismaClient().stripeWebhookEvent.delete({ where: { id: event.id } }).catch(() => {});
     throw error;
   }
 

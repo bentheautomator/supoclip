@@ -51,6 +51,12 @@ class User(Base):
     password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # Billing fields
+    notify_on_completion: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'true'")
+    )
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
     plan: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=sql_text("'free'")
     )
@@ -79,6 +85,25 @@ class User(Base):
     )
 
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    setting_key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    encrypted_value: Mapped[str] = mapped_column(Text, nullable=False)
+    prefer_admin_value: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    updated_by: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Task(Base):
     __tablename__ = "tasks"
 
@@ -97,6 +122,10 @@ class Task(Base):
     status: Mapped[str] = mapped_column(
         String(20), server_default=sql_text("'pending'"), nullable=False
     )
+    progress: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    progress_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Font customization fields
     font_family: Mapped[Optional[str]] = mapped_column(
@@ -130,6 +159,9 @@ class Task(Base):
     )
     error_code: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     stage_timings_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    completion_notification_sent_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

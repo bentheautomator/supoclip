@@ -19,9 +19,40 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+  SheetFooter,
+} from "@/components/ui/sheet";
 import { useSession } from "@/lib/auth-client";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
-import { ArrowLeft, Download, Star, AlertCircle, Trash2, Edit2, X, Check, Zap, MessageSquare, TrendingUp, Share2, Clock, Scissors, SplitSquareVertical, GitMerge, RefreshCw, Subtitles, Settings2, Type, Clapperboard } from "lucide-react";
+import {
+  ArrowLeft,
+  Download,
+  Star,
+  AlertCircle,
+  Trash2,
+  Edit2,
+  X,
+  Check,
+  Zap,
+  MessageSquare,
+  TrendingUp,
+  Share2,
+  Clock,
+  Scissors,
+  SplitSquareVertical,
+  GitMerge,
+  RefreshCw,
+  Subtitles,
+  Settings2,
+  Type,
+  Clapperboard,
+} from "lucide-react";
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { Progress } from "@/components/ui/progress";
 import Link from "next/link";
 import DynamicVideoPlayer from "@/components/dynamic-video-player";
@@ -65,6 +96,10 @@ interface TaskDetails {
   font_color?: string;
   caption_template?: string;
   include_broll?: boolean;
+  cut_long_pauses?: boolean;
+  pause_threshold_ms?: number;
+  remove_filler_words?: boolean;
+  filtered_words?: string[];
 }
 
 interface FontOption {
@@ -95,26 +130,34 @@ export default function TaskPage() {
   const [captionText, setCaptionText] = useState("");
   const [captionPosition, setCaptionPosition] = useState("bottom");
   const [highlightWords, setHighlightWords] = useState("");
-  const [exportPreset, setExportPreset] = useState("tiktok");
+  const [exportPreset, setExportPreset] = useState("original");
 
   const [projectFontFamily, setProjectFontFamily] = useState("TikTokSans-Regular");
   const [projectFontSize, setProjectFontSize] = useState("24");
   const [projectFontColor, setProjectFontColor] = useState("#FFFFFF");
   const [projectCaptionTemplate, setProjectCaptionTemplate] = useState("default");
   const [projectIncludeBroll, setProjectIncludeBroll] = useState(false);
+  const [projectCutLongPauses, setProjectCutLongPauses] = useState(false);
+  const [projectPauseThresholdMs, setProjectPauseThresholdMs] = useState("900");
+  const [projectRemoveFillerWords, setProjectRemoveFillerWords] = useState(false);
+  const [projectFilteredWords, setProjectFilteredWords] = useState("");
   const [isApplyingSettings, setIsApplyingSettings] = useState(false);
+  const [settingsSheetOpen, setSettingsSheetOpen] = useState(false);
   const [availableFonts, setAvailableFonts] = useState<FontOption[]>([]);
+  const [availableTemplates, setAvailableTemplates] = useState<
+    Array<{ id: string; name: string; description: string; animation: string }>
+  >([]);
   const hasTriggeredAutoRefresh = useRef(false);
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const taskApiUrl = "/api/tasks";
+  const getClipUrl = (videoUrl: string) =>
+    videoUrl.startsWith("/api/") ? videoUrl : `/api${videoUrl}`;
 
-  const buildSupportError = useCallback(
-    async (response: Response, fallbackMessage: string) => {
-      const parsed = await parseApiError(response, fallbackMessage);
-      return formatSupportMessage(parsed);
-    },
-    []
-  );
+  const buildSupportError = useCallback(async (response: Response, fallbackMessage: string) => {
+    const parsed = await parseApiError(response, fallbackMessage);
+    return formatSupportMessage(parsed);
+  }, []);
 
   const triggerAutoRefresh = useCallback(() => {
     if (hasTriggeredAutoRefresh.current) return;
@@ -124,70 +167,79 @@ export default function TaskPage() {
     }, 700);
   }, []);
 
-  const fetchTaskStatus = useCallback(async (retryCount = 0, maxRetries = 5) => {
-    if (!params.id) return false;
+  const fetchTaskStatus = useCallback(
+    async (retryCount = 0, maxRetries = 5) => {
+      if (!params.id) return false;
 
-    try {
-      // Fetch task details (including status)
-      // Don't wait for session - fetch immediately with user_id if available
-      const headers: HeadersInit = {};
-      if (session?.user?.id) {
-        headers["user_id"] = session.user.id;
-      }
-
-      const taskResponse = await fetch(`${apiUrl}/tasks/${params.id}`, {
-        headers,
-      });
-
-      // Handle 404 with retry logic (task might not be persisted yet)
-      if (taskResponse.status === 404 && retryCount < maxRetries) {
-        console.log(`Task not found yet, retrying in ${(retryCount + 1) * 500}ms... (${retryCount + 1}/${maxRetries})`);
-        await new Promise((resolve) => setTimeout(resolve, (retryCount + 1) * 500));
-        return fetchTaskStatus(retryCount + 1, maxRetries);
-      }
-
-      if (!taskResponse.ok) {
-        throw new Error(
-          await buildSupportError(taskResponse, `Failed to fetch task: ${taskResponse.status}`)
-        );
-      }
-
-      const taskData = await taskResponse.json();
-      setTask(taskData);
-      setProjectFontFamily(taskData.font_family || "TikTokSans-Regular");
-      setProjectFontSize(String(taskData.font_size || 24));
-      setProjectFontColor(taskData.font_color || "#FFFFFF");
-      setProjectCaptionTemplate(taskData.caption_template || "default");
-      setProjectIncludeBroll(Boolean(taskData.include_broll));
-
-      // Only fetch clips if task is completed
-      if (taskData.status === "completed") {
-        const clipsHeaders: HeadersInit = {};
-        if (session?.user?.id) {
-          clipsHeaders["user_id"] = session.user.id;
-        }
-
-        const clipsResponse = await fetch(`${apiUrl}/tasks/${params.id}/clips`, {
-          headers: clipsHeaders,
+      try {
+        const taskResponse = await fetch(`${taskApiUrl}/${params.id}`, {
+          cache: "no-store",
         });
 
-        if (!clipsResponse.ok) {
-          throw new Error(
-            await buildSupportError(clipsResponse, `Failed to fetch clips: ${clipsResponse.status}`)
+        // Handle 404 with retry logic (task might not be persisted yet)
+        if (taskResponse.status === 404 && retryCount < maxRetries) {
+          console.log(
+            `Task not found yet, retrying in ${(retryCount + 1) * 500}ms... (${retryCount + 1}/${maxRetries})`,
           );
+          await new Promise((resolve) => setTimeout(resolve, (retryCount + 1) * 500));
+          return fetchTaskStatus(retryCount + 1, maxRetries);
         }
 
-        const clipsData = await clipsResponse.json();
-        setClips(clipsData.clips || []);
-      }
+        if (!taskResponse.ok) {
+          throw new Error(await buildSupportError(taskResponse, `Failed to fetch task: ${taskResponse.status}`));
+        }
 
-      return true;
-    } catch (err) {
-      console.error("Error fetching task data:", err);
-      setError(err instanceof Error ? err.message : "Failed to load task");
-      return false;
-    }
-  }, [apiUrl, buildSupportError, params.id, session?.user?.id]);
+        const taskData = await taskResponse.json();
+        setTask(taskData);
+        setProjectFontFamily(taskData.font_family || "TikTokSans-Regular");
+        setProjectFontSize(String(taskData.font_size || 24));
+        setProjectFontColor(taskData.font_color || "#FFFFFF");
+        setProjectCaptionTemplate(taskData.caption_template || "default");
+        setProjectIncludeBroll(Boolean(taskData.include_broll));
+        setProjectCutLongPauses(Boolean(taskData.cut_long_pauses));
+        setProjectPauseThresholdMs(String(taskData.pause_threshold_ms || 900));
+        setProjectRemoveFillerWords(Boolean(taskData.remove_filler_words));
+        setProjectFilteredWords((taskData.filtered_words || []).join(", "));
+
+        // Fetch clips if task is completed or processing (incremental clips)
+        if (taskData.status === "completed" || taskData.status === "processing") {
+          const clipsResponse = await fetch(`${taskApiUrl}/${params.id}/clips`, {
+            cache: "no-store",
+          });
+
+          if (!clipsResponse.ok) {
+            throw new Error(await buildSupportError(clipsResponse, `Failed to fetch clips: ${clipsResponse.status}`));
+          }
+
+          const clipsData = await clipsResponse.json();
+          const nextClips = clipsData.clips || [];
+          setClips((prev) => {
+            if (taskData.status === "completed") {
+              return nextClips;
+            }
+
+            const merged = new Map<string, Clip>();
+            for (const clip of prev) {
+              merged.set(clip.id, clip);
+            }
+            for (const clip of nextClips) {
+              merged.set(clip.id, clip);
+            }
+            return Array.from(merged.values()).sort(
+              (a, b) => (a.clip_order ?? 0) - (b.clip_order ?? 0),
+            );
+          });
+        }
+
+        return true;
+      } catch (err) {
+        console.error("Error fetching task data:", err);
+        setError(err instanceof Error ? err.message : "Failed to load task");
+        return false;
+      }
+    },
+    [buildSupportError, params.id, taskApiUrl],
+  );
 
   // Initial fetch - runs immediately, doesn't wait for session
   useEffect(() => {
@@ -220,7 +272,20 @@ export default function TaskPage() {
     };
 
     void loadFonts();
-  }, []);
+
+    const loadTemplates = async () => {
+      try {
+        const response = await fetch(`${apiUrl}/caption-templates`);
+        if (response.ok) {
+          const data = await response.json();
+          setAvailableTemplates(data.templates || []);
+        }
+      } catch (error) {
+        console.error("Failed to load caption templates:", error);
+      }
+    };
+    void loadTemplates();
+  }, [apiUrl]);
 
   // SSE effect - real-time progress updates
   useEffect(() => {
@@ -230,8 +295,7 @@ export default function TaskPage() {
     // Only connect to SSE if task is queued or processing
     if (taskStatus !== "queued" && taskStatus !== "processing") return;
 
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const eventSource = new EventSource(`${apiUrl}/tasks/${params.id}/progress`);
+    const eventSource = new EventSource(`${taskApiUrl}/${params.id}/progress`);
 
     console.log("📡 Connected to SSE for real-time progress");
 
@@ -254,13 +318,25 @@ export default function TaskPage() {
 
       // Update task status if provided
       if (data.status) {
-        setTask((currentTask) =>
-          currentTask ? { ...currentTask, status: data.status } : currentTask
-        );
+        setTask((currentTask) => (currentTask ? { ...currentTask, status: data.status } : currentTask));
 
         if (data.status === "completed") {
           void fetchTaskStatus().then(() => triggerAutoRefresh());
         }
+      }
+    });
+
+    eventSource.addEventListener("clip_ready", (e) => {
+      const data = JSON.parse(e.data);
+      console.log("🎬 Clip ready:", data.clip_index + 1, "/", data.total_clips);
+      if (data.clip) {
+        setClips((prev) => {
+          const exists = prev.some((c: Clip) => c.id === data.clip.id);
+          if (exists) return prev;
+          return [...prev, data.clip].sort(
+            (a: Clip, b: Clip) => (a.clip_order ?? 0) - (b.clip_order ?? 0),
+          );
+        });
       }
     });
 
@@ -288,7 +364,7 @@ export default function TaskPage() {
       console.log("🔌 Disconnecting SSE");
       eventSource.close();
     };
-  }, [params.id, task?.status, fetchTaskStatus]); // Re-run when task status changes
+  }, [params.id, task?.status, fetchTaskStatus, taskApiUrl, triggerAutoRefresh]); // Re-run when task status changes
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -323,7 +399,7 @@ export default function TaskPage() {
       statistic: "Data/Stats",
       story: "Story Hook",
       contrast: "Contrast Hook",
-      none: "No Hook"
+      none: "No Hook",
     };
     return labels[hookType || "none"] || hookType || "None";
   };
@@ -332,11 +408,10 @@ export default function TaskPage() {
     if (!editedTitle.trim() || !session?.user?.id || !params.id) return;
 
     try {
-      const response = await fetch(`${apiUrl}/tasks/${params.id}`, {
+      const response = await fetch(`${taskApiUrl}/${params.id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          user_id: session.user.id,
         },
         body: JSON.stringify({ title: editedTitle }),
       });
@@ -358,11 +433,8 @@ export default function TaskPage() {
 
     setIsDeleting(true);
     try {
-      const response = await fetch(`${apiUrl}/tasks/${params.id}`, {
+      const response = await fetch(`${taskApiUrl}/${params.id}`, {
         method: "DELETE",
-        headers: {
-          user_id: session.user.id,
-        },
       });
 
       if (response.ok) {
@@ -383,11 +455,8 @@ export default function TaskPage() {
     if (!session?.user?.id || !params.id) return;
 
     try {
-      const response = await fetch(`${apiUrl}/tasks/${params.id}/clips/${clipId}`, {
+      const response = await fetch(`${taskApiUrl}/${params.id}/clips/${clipId}`, {
         method: "DELETE",
-        headers: {
-          user_id: session.user.id,
-        },
       });
 
       if (response.ok) {
@@ -413,11 +482,10 @@ export default function TaskPage() {
 
   const handleTrimClip = async (clipId: string) => {
     if (!session?.user?.id || !params.id) return;
-    const response = await fetch(`${apiUrl}/tasks/${params.id}/clips/${clipId}`, {
+    const response = await fetch(`${taskApiUrl}/${params.id}/clips/${clipId}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        user_id: session.user.id,
       },
       body: JSON.stringify({
         start_offset: Number(startOffset || "0"),
@@ -433,11 +501,10 @@ export default function TaskPage() {
 
   const handleSplitClip = async (clipId: string) => {
     if (!session?.user?.id || !params.id) return;
-    const response = await fetch(`${apiUrl}/tasks/${params.id}/clips/${clipId}/split`, {
+    const response = await fetch(`${taskApiUrl}/${params.id}/clips/${clipId}/split`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        user_id: session.user.id,
       },
       body: JSON.stringify({ split_time: Number(splitTime || "5") }),
     });
@@ -450,11 +517,10 @@ export default function TaskPage() {
 
   const handleMergeClips = async () => {
     if (!session?.user?.id || !params.id || selectedClipIds.length < 2) return;
-    const response = await fetch(`${apiUrl}/tasks/${params.id}/clips/merge`, {
+    const response = await fetch(`${taskApiUrl}/${params.id}/clips/merge`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        user_id: session.user.id,
       },
       body: JSON.stringify({ clip_ids: selectedClipIds }),
     });
@@ -468,11 +534,10 @@ export default function TaskPage() {
 
   const handleUpdateCaptions = async (clipId: string) => {
     if (!session?.user?.id || !params.id) return;
-    const response = await fetch(`${apiUrl}/tasks/${params.id}/clips/${clipId}/captions`, {
+    const response = await fetch(`${taskApiUrl}/${params.id}/clips/${clipId}/captions`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        user_id: session.user.id,
       },
       body: JSON.stringify({
         caption_text: captionText,
@@ -493,20 +558,23 @@ export default function TaskPage() {
   const handleApplyProjectSettings = async () => {
     if (!session?.user?.id || !params.id) return;
     const parsedSize = Number(projectFontSize || "24");
-    const safeFontSize = Number.isFinite(parsedSize)
-      ? Math.max(12, Math.min(72, Math.round(parsedSize)))
-      : 24;
-    const normalizedColor = /^#[0-9A-Fa-f]{6}$/.test(projectFontColor)
-      ? projectFontColor
-      : "#FFFFFF";
+    const safeFontSize = Number.isFinite(parsedSize) ? Math.max(12, Math.min(72, Math.round(parsedSize))) : 24;
+    const normalizedColor = /^#[0-9A-Fa-f]{6}$/.test(projectFontColor) ? projectFontColor : "#FFFFFF";
+    const parsedPauseThreshold = Number(projectPauseThresholdMs || "900");
+    const safePauseThreshold = Number.isFinite(parsedPauseThreshold)
+      ? Math.max(250, Math.min(3000, Math.round(parsedPauseThreshold)))
+      : 900;
+    const normalizedFilteredWords = projectFilteredWords
+      .split(",")
+      .map((word) => word.trim().toLowerCase())
+      .filter(Boolean);
 
     setIsApplyingSettings(true);
     try {
-      const response = await fetch(`${apiUrl}/tasks/${params.id}/settings`, {
+      const response = await fetch(`${taskApiUrl}/${params.id}/settings`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          user_id: session.user.id,
         },
         body: JSON.stringify({
           font_family: projectFontFamily,
@@ -514,6 +582,10 @@ export default function TaskPage() {
           font_color: normalizedColor,
           caption_template: projectCaptionTemplate,
           include_broll: projectIncludeBroll,
+          cut_long_pauses: projectCutLongPauses,
+          pause_threshold_ms: safePauseThreshold,
+          remove_filler_words: projectRemoveFillerWords,
+          filtered_words: normalizedFilteredWords,
           apply_to_existing: true,
         }),
       });
@@ -530,10 +602,8 @@ export default function TaskPage() {
   const handleExportClip = async (clipId: string, fallbackFilename: string) => {
     if (!session?.user?.id || !task?.id) return;
 
-    const response = await fetch(`${apiUrl}/tasks/${task.id}/clips/${clipId}/export?preset=${exportPreset}`, {
-      headers: {
-        user_id: session.user.id,
-      },
+    const response = await fetch(`${taskApiUrl}/${task.id}/clips/${clipId}/export?preset=${exportPreset}`, {
+      cache: "no-store",
     });
 
     if (!response.ok) {
@@ -550,6 +620,19 @@ export default function TaskPage() {
     link.click();
     link.remove();
     URL.revokeObjectURL(blobUrl);
+  };
+
+  const handleDownloadClip = (clip: Clip) => {
+    if (exportPreset === "original") {
+      const link = document.createElement("a");
+      link.href = getClipUrl(clip.video_url);
+      link.download = clip.filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      return;
+    }
+    void handleExportClip(clip.id, clip.filename);
   };
 
   if (isLoading) {
@@ -635,25 +718,27 @@ export default function TaskPage() {
                   </div>
                 ) : (
                   <>
-                    <h1 className="text-2xl font-bold text-black">{task.source_title}</h1>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setIsEditing(true);
-                        setEditedTitle(task.source_title);
-                      }}
-                    >
-                      <Edit2 className="w-4 h-4" />
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="text-red-600 hover:text-red-700 hover:bg-red-50"
-                      onClick={() => setShowDeleteDialog(true)}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
+                    <h1 className={`text-2xl font-bold text-black ${task.status === "processing" || task.status === "queued" ? "shimmer" : ""}`}>{task.source_title}</h1>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setIsEditing(true);
+                          setEditedTitle(task.source_title);
+                        }}
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                        onClick={() => setShowDeleteDialog(true)}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
                   </>
                 )}
               </div>
@@ -661,16 +746,38 @@ export default function TaskPage() {
                 <Badge variant="outline" className="capitalize">
                   {task.source_type}
                 </Badge>
-                <span className="flex items-center gap-1">
-                  <Clock className="w-4 h-4" />
-                  {new Date(task.created_at).toLocaleDateString()}
-                </span>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="flex items-center gap-1 cursor-default">
+                        <Clock className="w-4 h-4" />
+                        {new Date(task.created_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {new Date(task.created_at).toLocaleString(undefined, {
+                        year: "numeric",
+                        month: "long",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                        timeZoneName: "short",
+                      })}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
                 {task.status === "completed" ? (
                   <span>
                     {clips.length} {clips.length === 1 ? "clip" : "clips"} generated
                   </span>
                 ) : task.status === "processing" ? (
-                  <Badge className="bg-blue-100 text-blue-800">Processing</Badge>
+                  <div className="relative group">
+                    <Badge className="bg-blue-100 text-blue-800 cursor-default shimmer">Processing</Badge>
+                    <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md opacity-0 scale-95 transition-all group-hover:opacity-100 group-hover:scale-100 pointer-events-none">
+                      🔍&nbsp;&nbsp;We&apos;re currently processing your video. Check back in a couple minutes.
+                    </div>
+                  </div>
                 ) : task.status === "queued" ? (
                   <Badge className="bg-yellow-100 text-yellow-800">Queued</Badge>
                 ) : (
@@ -691,11 +798,8 @@ export default function TaskPage() {
                     size="sm"
                     variant="outline"
                     onClick={async () => {
-                      await fetch(`${apiUrl}/tasks/${task.id}/cancel`, {
+                      await fetch(`${taskApiUrl}/${task.id}/cancel`, {
                         method: "POST",
-                        headers: {
-                          user_id: session?.user?.id || "",
-                        },
                       });
                       await fetchTaskStatus();
                     }}
@@ -708,11 +812,8 @@ export default function TaskPage() {
                     size="sm"
                     variant="outline"
                     onClick={async () => {
-                      await fetch(`${apiUrl}/tasks/${task.id}/resume`, {
+                      await fetch(`${taskApiUrl}/${task.id}/resume`, {
                         method: "POST",
-                        headers: {
-                          user_id: session?.user?.id || "",
-                        },
                       });
                       await fetchTaskStatus();
                     }}
@@ -729,29 +830,91 @@ export default function TaskPage() {
       {/* Main Content */}
       <div className="max-w-6xl mx-auto px-4 py-8">
         {task?.status === "processing" || task?.status === "queued" ? (
-          <div className="flex flex-col items-center justify-center min-h-[50vh] py-16">
-            {/* Minimal animated dots */}
-            <div className="flex items-center gap-1.5 mb-8">
-              <span className="w-2 h-2 bg-neutral-800 rounded-full animate-[pulse_1.4s_ease-in-out_infinite]" />
-              <span className="w-2 h-2 bg-neutral-800 rounded-full animate-[pulse_1.4s_ease-in-out_0.2s_infinite]" />
-              <span className="w-2 h-2 bg-neutral-800 rounded-full animate-[pulse_1.4s_ease-in-out_0.4s_infinite]" />
+          <div className="space-y-8">
+            {/* Progress indicator */}
+            <div className="flex flex-col items-center py-8">
+              {/* Minimal animated dots */}
+              <div className="relative group flex items-center gap-1.5 mb-8 cursor-default">
+                <span className="w-2 h-2 bg-neutral-800 rounded-full animate-[pulse_1.4s_ease-in-out_infinite]" />
+                <span className="w-2 h-2 bg-neutral-800 rounded-full animate-[pulse_1.4s_ease-in-out_0.2s_infinite]" />
+                <span className="w-2 h-2 bg-neutral-800 rounded-full animate-[pulse_1.4s_ease-in-out_0.4s_infinite]" />
+                <div className="absolute top-full mt-3 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md opacity-0 scale-95 transition-all group-hover:opacity-100 group-hover:scale-100 pointer-events-none">
+                  ☕&nbsp;&nbsp;Grab a coffee, and come back to ready-to-post clips.
+                </div>
+              </div>
+
+              {/* Status message */}
+              <p className="shimmer text-neutral-600/60 text-sm tracking-wide mb-8">
+                {progressMessage || (task.status === "queued" ? "Waiting in queue" : "Processing")}
+              </p>
+
+              {/* Minimal progress bar */}
+              {progress > 0 && (
+                <div className="w-48">
+                  <div className="h-px bg-neutral-200 w-full relative overflow-hidden">
+                    <div
+                      className="absolute inset-y-0 left-0 bg-neutral-800 transition-all duration-700 ease-out"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
+                  <p className="text-[11px] text-neutral-400 text-center mt-3 tabular-nums">{progress}%</p>
+                </div>
+              )}
             </div>
 
-            {/* Status message */}
-            <p className="text-neutral-600 text-sm tracking-wide mb-8">
-              {progressMessage || (task.status === "queued" ? "Waiting in queue" : "Processing")}
-            </p>
-
-            {/* Minimal progress bar */}
-            {progress > 0 && (
-              <div className="w-48">
-                <div className="h-px bg-neutral-200 w-full relative overflow-hidden">
-                  <div
-                    className="absolute inset-y-0 left-0 bg-neutral-800 transition-all duration-700 ease-out"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-                <p className="text-[11px] text-neutral-400 text-center mt-3 tabular-nums">{progress}%</p>
+            {/* Live clips grid — shows clips as they render */}
+            {clips.length > 0 && (
+              <div className="grid gap-6">
+                <p className="text-sm text-neutral-500 text-center">
+                  {clips.length} clip{clips.length !== 1 ? "s" : ""} ready
+                </p>
+                {clips.map((clip) => (
+                  <Card key={clip.id} className="overflow-hidden">
+                    <CardContent className="p-0">
+                      <div className="flex flex-col lg:flex-row">
+                        <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
+                          <DynamicVideoPlayer src={getClipUrl(clip.video_url)} poster="/placeholder-video.jpg" />
+                        </div>
+                        <div className="p-6 flex-1">
+                          <div className="flex items-start justify-between mb-4">
+                            <div>
+                              <h3 className="font-semibold text-lg text-black mb-1">Clip {clip.clip_order}</h3>
+                              <div className="flex items-center gap-2 text-sm text-gray-600">
+                                <span>{clip.start_time} - {clip.end_time}</span>
+                                <span>•</span>
+                                <span>{formatDuration(clip.duration)}</span>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {clip.virality_score > 0 && (
+                                <Badge className={`${getViralityBgColor(clip.virality_score)} text-white`}>
+                                  <Zap className="w-3 h-3 mr-1" />
+                                  {clip.virality_score}
+                                </Badge>
+                              )}
+                              <Badge className={getScoreColor(clip.relevance_score)}>
+                                <Star className="w-3 h-3 mr-1" />
+                                {(clip.relevance_score * 100).toFixed(0)}%
+                              </Badge>
+                            </div>
+                          </div>
+                          {clip.text && (
+                            <div className="mb-4">
+                              <h4 className="font-medium text-black mb-2">Transcript</h4>
+                              <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded">{clip.text}</p>
+                            </div>
+                          )}
+                          <Button size="sm" variant="outline" asChild>
+                            <a href={getClipUrl(clip.video_url)} download={clip.filename}>
+                              <Download className="w-4 h-4" />
+                              Download
+                            </a>
+                          </Button>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
               </div>
             )}
           </div>
@@ -814,111 +977,187 @@ export default function TaskPage() {
           </Card>
         ) : (
           <div className="grid gap-6">
-            <Card>
-              <CardContent className="p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-medium text-black flex items-center gap-2"><Settings2 className="w-4 h-4" />Project Settings</h3>
-                  <Button size="sm" onClick={handleApplyProjectSettings} disabled={isApplyingSettings}>
-                    {isApplyingSettings ? "Applying..." : "Apply to All Clips"}
-                  </Button>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
-                  <Select value={projectFontFamily} onValueChange={setProjectFontFamily}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Font family" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableFonts.map((font) => (
-                        <SelectItem key={font.name} value={font.name}>
-                          <span className="flex items-center gap-2">
-                            <Type className="w-3 h-3" />
-                            {font.display_name}
-                          </span>
-                        </SelectItem>
-                      ))}
-                      {availableFonts.length === 0 && (
-                        <SelectItem value="TikTokSans-Regular">TikTok Sans Regular</SelectItem>
-                      )}
-                    </SelectContent>
-                  </Select>
-                  <Input
-                    type="number"
-                    min={12}
-                    max={72}
-                    value={projectFontSize}
-                    onChange={(e) => setProjectFontSize(e.target.value)}
-                    placeholder="Font size"
-                  />
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="color"
-                      value={projectFontColor}
-                      onChange={(e) => setProjectFontColor(e.target.value)}
-                      className="h-10 w-10 rounded border border-gray-300"
-                    />
-                    <Input
-                      value={projectFontColor}
-                      onChange={(e) => setProjectFontColor(e.target.value)}
-                      placeholder="#FFFFFF"
-                    />
-                  </div>
-                  <Input value={projectCaptionTemplate} onChange={(e) => setProjectCaptionTemplate(e.target.value)} placeholder="Caption template" />
-                  <label className="flex items-center gap-2 text-sm text-gray-700 px-2">
-                    <input type="checkbox" checked={projectIncludeBroll} onChange={(e) => setProjectIncludeBroll(e.target.checked)} />
-                    Include B-roll
-                  </label>
-                </div>
-              </CardContent>
-            </Card>
-
-            {selectedClipIds.length >= 2 && (
-              <div className="flex justify-end">
-                <Button variant="outline" onClick={handleMergeClips}>
+            <div className="flex items-center justify-between">
+              <Button variant="outline" size="sm" onClick={() => setSettingsSheetOpen(true)}>
+                <Settings2 className="w-4 h-4" />
+                Project Settings
+              </Button>
+              {selectedClipIds.length >= 2 && (
+                <Button variant="outline" size="sm" onClick={handleMergeClips}>
                   <GitMerge className="w-4 h-4" />
                   Merge Selected ({selectedClipIds.length})
                 </Button>
-              </div>
-            )}
+              )}
+            </div>
 
-            {/* Font Settings Display */}
-            {task && (
-              <div className="bg-gray-50 rounded-lg p-4">
-                <h3 className="text-sm font-medium text-black mb-3 flex items-center gap-2">
-                  <span className="w-4 h-4">🎨</span>
-                  Font Settings
-                </h3>
-                <div className="grid grid-cols-3 gap-4 text-xs">
-                  <div>
-                    <span className="text-gray-500">Font:</span>
-                    <p className="font-medium">{task.font_family || "Default"}</p>
+            <Sheet open={settingsSheetOpen} onOpenChange={setSettingsSheetOpen}>
+              <SheetContent side="right" className="sm:max-w-md overflow-y-auto">
+                <SheetHeader>
+                  <SheetTitle className="flex items-center gap-2">
+                    <Settings2 className="w-4 h-4" />
+                    Project Settings
+                  </SheetTitle>
+                  <SheetDescription>
+                    Configure font, caption, and B-roll settings for this task&apos;s clips.
+                  </SheetDescription>
+                </SheetHeader>
+
+                <div className="space-y-5 px-4">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-500">Font</label>
+                    <Select value={projectFontFamily} onValueChange={setProjectFontFamily}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Font family" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {availableFonts.map((font) => (
+                          <SelectItem key={font.name} value={font.name}>
+                            <span className="flex items-center gap-2">
+                              <Type className="w-3 h-3" />
+                              {font.display_name}
+                            </span>
+                          </SelectItem>
+                        ))}
+                        {availableFonts.length === 0 && (
+                          <SelectItem value="TikTokSans-Regular">TikTok Sans Regular</SelectItem>
+                        )}
+                      </SelectContent>
+                    </Select>
                   </div>
-                  <div>
-                    <span className="text-gray-500">Size:</span>
-                    <p className="font-medium">{task.font_size || 24}px</p>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-500">Size</label>
+                    <Input
+                      type="number"
+                      min={12}
+                      max={72}
+                      value={projectFontSize}
+                      onChange={(e) => setProjectFontSize(e.target.value)}
+                      placeholder="Font size"
+                    />
                   </div>
-                  <div>
-                    <span className="text-gray-500">Color:</span>
-                    <div className="flex items-center gap-1">
-                      <div
-                        className="w-3 h-3 rounded border"
-                        style={{ backgroundColor: task.font_color || "#FFFFFF" }}
-                      ></div>
-                      <p className="font-medium">{task.font_color || "#FFFFFF"}</p>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-500">Color</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={projectFontColor}
+                        onChange={(e) => setProjectFontColor(e.target.value)}
+                        className="h-9 w-9 rounded border border-gray-300 cursor-pointer"
+                      />
+                      <Input
+                        value={projectFontColor}
+                        onChange={(e) => setProjectFontColor(e.target.value)}
+                        placeholder="#FFFFFF"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-500">Caption Template</label>
+                    <Select value={projectCaptionTemplate} onValueChange={setProjectCaptionTemplate}>
+                      <SelectTrigger>
+                        <SelectValue>
+                          {availableTemplates.find((t) => t.id === projectCaptionTemplate)?.name || "Select style"}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {availableTemplates.map((template) => (
+                          <SelectItem key={template.id} value={template.id}>
+                            <div>
+                              <div className="font-medium">{template.name}</div>
+                              <div className="text-xs text-gray-500">{template.description}</div>
+                            </div>
+                          </SelectItem>
+                        ))}
+                        {availableTemplates.length === 0 && <SelectItem value="default">Default</SelectItem>}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <label className="flex items-center gap-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={projectIncludeBroll}
+                      onChange={(e) => setProjectIncludeBroll(e.target.checked)}
+                      className="rounded"
+                    />
+                    Include B-roll
+                  </label>
+
+                  <div className="rounded-lg border bg-gray-50 p-3 space-y-3">
+                    <div>
+                      <div className="text-sm font-medium text-gray-900">Clip cleanup</div>
+                      <div className="text-xs text-gray-500">Apply silence and filler-word cuts to regenerated clips.</div>
+                    </div>
+
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={projectCutLongPauses}
+                        onChange={(e) => setProjectCutLongPauses(e.target.checked)}
+                        className="rounded"
+                      />
+                      Cut long pauses
+                    </label>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-gray-500">Pause threshold (ms)</label>
+                      <Input
+                        type="number"
+                        min={250}
+                        max={3000}
+                        step={50}
+                        value={projectPauseThresholdMs}
+                        onChange={(e) => setProjectPauseThresholdMs(e.target.value)}
+                        disabled={!projectCutLongPauses}
+                      />
+                    </div>
+
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={projectRemoveFillerWords}
+                        onChange={(e) => setProjectRemoveFillerWords(e.target.checked)}
+                        className="rounded"
+                      />
+                      Remove filler words
+                    </label>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-gray-500">Extra filtered words or phrases</label>
+                      <Input
+                        value={projectFilteredWords}
+                        onChange={(e) => setProjectFilteredWords(e.target.value)}
+                        placeholder="basically, literally, to be honest"
+                      />
                     </div>
                   </div>
                 </div>
-              </div>
-            )}
+
+                <SheetFooter>
+                  <Button
+                    className="w-full"
+                    onClick={() => {
+                      handleApplyProjectSettings();
+                      setSettingsSheetOpen(false);
+                    }}
+                    disabled={isApplyingSettings}
+                  >
+                    {isApplyingSettings ? "Applying..." : "Apply to All Clips"}
+                  </Button>
+                </SheetFooter>
+              </SheetContent>
+            </Sheet>
+
             {clips.map((clip) => (
               <Card key={clip.id} className="overflow-hidden">
                 <CardContent className="p-0">
                   <div className="flex flex-col lg:flex-row">
                     {/* Video Player */}
-                    <div className="bg-black relative flex-shrink-0 flex items-center justify-center">
-                      <DynamicVideoPlayer
-                        src={`${apiUrl}${clip.video_url}`}
-                        poster="/placeholder-video.jpg"
-                      />
+                    <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
+                      <DynamicVideoPlayer src={getClipUrl(clip.video_url)} poster="/placeholder-video.jpg" />
                     </div>
 
                     {/* Clip Details */}
@@ -1037,43 +1276,33 @@ export default function TaskPage() {
                         </div>
                       )}
 
-                      {clip.reasoning && (
-                        <div className="mb-4">
-                          <h4 className="font-medium text-black mb-2">AI Analysis</h4>
-                          <p className="text-sm text-gray-600">{clip.reasoning}</p>
-                        </div>
-                      )}
-
-                      <div className="flex gap-2">
-                        <Button size="sm" variant="outline" asChild>
-                          <a href={`${apiUrl}${clip.video_url}`} download={clip.filename}>
+                      <div className="flex items-center gap-2">
+                        <div className="inline-flex items-stretch h-8 rounded-md border border-input bg-background shadow-xs overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadClip(clip)}
+                            className="inline-flex items-center gap-1.5 px-3 text-sm font-medium hover:bg-accent transition-colors focus-visible:outline-none focus-visible:bg-accent"
+                          >
                             <Download className="w-4 h-4" />
                             Download
-                          </a>
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => handleExportClip(clip.id, clip.filename)}>
-                          <Download className="w-4 h-4" />
-                          Export
-                        </Button>
-                        <Select value={exportPreset} onValueChange={setExportPreset}>
-                          <SelectTrigger className="h-8 w-28">
-                            <SelectValue placeholder="Preset" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="tiktok">TikTok</SelectItem>
-                            <SelectItem value="reels">Reels</SelectItem>
-                            <SelectItem value="shorts">Shorts</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
-                          onClick={() => setDeletingClipId(clip.id)}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                          Delete
-                        </Button>
+                          </button>
+                          <Select value={exportPreset} onValueChange={setExportPreset}>
+                            <SelectTrigger
+                              size="sm"
+                              aria-label="Download format"
+                              className="h-8 min-w-[112px] rounded-none border-0 border-l border-input shadow-none focus-visible:ring-0 focus-visible:border-input bg-transparent"
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent align="end">
+                              <SelectItem value="original">Original</SelectItem>
+                              <SelectItem value="tiktok">TikTok</SelectItem>
+                              <SelectItem value="reels">Reels</SelectItem>
+                              <SelectItem value="shorts">Shorts</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
                         <Button
                           size="sm"
                           variant="outline"
@@ -1085,28 +1314,57 @@ export default function TaskPage() {
                           <Scissors className="w-4 h-4" />
                           Edit
                         </Button>
+
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label="Delete clip"
+                          className="ml-auto text-red-600 hover:text-red-700 hover:bg-red-50"
+                          onClick={() => setDeletingClipId(clip.id)}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
                       </div>
 
                       {editingClipId === clip.id && (
                         <div className="mt-4 p-3 border rounded-lg space-y-3 bg-gray-50">
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                            <Input value={startOffset} onChange={(e) => setStartOffset(e.target.value)} placeholder="Start trim (sec)" />
-                            <Input value={endOffset} onChange={(e) => setEndOffset(e.target.value)} placeholder="End trim (sec)" />
+                            <Input
+                              value={startOffset}
+                              onChange={(e) => setStartOffset(e.target.value)}
+                              placeholder="Start trim (sec)"
+                            />
+                            <Input
+                              value={endOffset}
+                              onChange={(e) => setEndOffset(e.target.value)}
+                              placeholder="End trim (sec)"
+                            />
                             <Button size="sm" onClick={() => handleTrimClip(clip.id)}>
-                              <Scissors className="w-4 h-4" />Trim
+                              <Scissors className="w-4 h-4" />
+                              Trim
                             </Button>
                           </div>
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                            <Input value={splitTime} onChange={(e) => setSplitTime(e.target.value)} placeholder="Split at (sec)" />
+                            <Input
+                              value={splitTime}
+                              onChange={(e) => setSplitTime(e.target.value)}
+                              placeholder="Split at (sec)"
+                            />
                             <Button size="sm" variant="outline" onClick={() => handleSplitClip(clip.id)}>
-                              <SplitSquareVertical className="w-4 h-4" />Split
+                              <SplitSquareVertical className="w-4 h-4" />
+                              Split
                             </Button>
                             <Button size="sm" variant="outline" onClick={() => handleTrimClip(clip.id)}>
-                              <RefreshCw className="w-4 h-4" />Regenerate
+                              <RefreshCw className="w-4 h-4" />
+                              Regenerate
                             </Button>
                           </div>
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                            <Input value={captionText} onChange={(e) => setCaptionText(e.target.value)} placeholder="Caption text" />
+                            <Input
+                              value={captionText}
+                              onChange={(e) => setCaptionText(e.target.value)}
+                              placeholder="Caption text"
+                            />
                             <Select value={captionPosition} onValueChange={setCaptionPosition}>
                               <SelectTrigger>
                                 <SelectValue placeholder="Caption position" />
@@ -1117,10 +1375,15 @@ export default function TaskPage() {
                                 <SelectItem value="bottom">Bottom</SelectItem>
                               </SelectContent>
                             </Select>
-                            <Input value={highlightWords} onChange={(e) => setHighlightWords(e.target.value)} placeholder="Highlights: word1, word2" />
+                            <Input
+                              value={highlightWords}
+                              onChange={(e) => setHighlightWords(e.target.value)}
+                              placeholder="Highlights: word1, word2"
+                            />
                           </div>
                           <Button size="sm" variant="outline" onClick={() => handleUpdateCaptions(clip.id)}>
-                            <Subtitles className="w-4 h-4" />Update Captions
+                            <Subtitles className="w-4 h-4" />
+                            Update Captions
                           </Button>
                         </div>
                       )}

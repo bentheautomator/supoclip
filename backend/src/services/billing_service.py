@@ -7,7 +7,13 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..config import Config
+from ..config import Config, get_config
+
+PAID_PLAN_STATUSES = {"active", "trialing"}
+PAID_PLAN_LIMIT_CONFIG = {
+    "pro": "pro_plan_task_limit",
+    "scale": "scale_plan_task_limit",
+}
 
 
 class BillingLimitExceeded(Exception):
@@ -17,9 +23,9 @@ class BillingLimitExceeded(Exception):
 
 
 class BillingService:
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, config: Config | None = None):
         self.db = db
-        self.config = Config()
+        self.config = config or get_config()
 
     @staticmethod
     def _month_window(now: datetime) -> tuple[datetime, datetime]:
@@ -119,9 +125,8 @@ class BillingService:
 
         plan = row["plan"]
         status = row["subscription_status"]
-        is_paid = plan == "pro" and status in {"active", "trialing"}
+        is_paid = plan in PAID_PLAN_LIMIT_CONFIG and status in PAID_PLAN_STATUSES
 
-        # Hosted mode requires an active/trialing paid subscription.
         if not is_paid:
             return {
                 "monetization_enabled": True,
@@ -131,14 +136,16 @@ class BillingService:
                 "period_end": end,
                 "trial_ends_at": row.get("trial_ends_at"),
                 "usage_count": usage_count,
-                "usage_limit": None,
-                "remaining": None,
+                "usage_limit": 0,
+                "remaining": 0,
                 "can_create_task": False,
                 "upgrade_required": True,
-                "reason": "Active subscription required",
+                "reason": "Choose a paid plan to process videos.",
             }
 
-        usage_limit = self.config.pro_plan_task_limit
+        usage_limit = int(
+            getattr(self.config, PAID_PLAN_LIMIT_CONFIG[plan])
+        )
         unlimited = usage_limit <= 0
         can_create = unlimited or usage_count < usage_limit
         remaining = None if unlimited else max(usage_limit - usage_count, 0)

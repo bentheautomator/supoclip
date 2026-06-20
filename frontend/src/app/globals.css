@@ -1,5 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "tw-shimmer";
+
 
 @custom-variant dark (&:is(.dark *));
 
@@ -123,6 +125,7 @@
   }
 }
 
+
 /* Landing page animations */
 @keyframes landing-fade-in-up {
   from {
@@ -150,4 +153,21 @@
 @keyframes landing-clip-pulse {
   0%, 100% { border-color: oklch(0.216 0.006 56.043 / 0.15); }
   50% { border-color: oklch(0.216 0.006 56.043 / 0.45); }
+}
+
+/* Batch command bar */
+@keyframes command-bar-in {
+  from {
+    opacity: 0;
+    transform: translateY(100%) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes command-bar-pulse {
+  0%, 100% { box-shadow: 0 -4px 30px oklch(0.216 0.006 56.043 / 0.12); }
+  50% { box-shadow: 0 -4px 30px oklch(0.216 0.006 56.043 / 0.22); }
 }
